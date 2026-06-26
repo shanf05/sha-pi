@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sha-pi station</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>sha-pi station</h1>
+    <span id="clock"></span>
+  </header>
+
+  <nav id="tabs">
+    <button class="tab active" data-tab="system">System</button>
+    <button class="tab" data-tab="sdr">SDR Status</button>
+    <button class="tab" data-tab="spectrum">Spectrum</button>
+    <button class="tab" data-tab="adsb">ADS-B</button>
+    <button class="tab" data-tab="sensors">Sensors (433)</button>
+  </nav>
+
+  <main>
+    <section id="system" class="panel active">
+      <div class="cards" id="system-cards">
+        <p class="muted">Loading system information…</p>
+      </div>
+    </section>
+
+    <section id="sdr" class="panel">
+      <div id="sdr-status">
+        <p class="muted">Loading SDR status…</p>
+      </div>
+    </section>
+
+    <section id="spectrum" class="panel">
+      <div class="placeholder">
+        <h2>Spectrum &amp; waterfall</h2>
+        <p>Sweeps a frequency range and shows what is on the air.</p>
+        <p class="muted">Activates once the RTL-SDR dongle is connected (Phase 2).</p>
+      </div>
+    </section>
+
+    <section id="adsb" class="panel">
+      <div class="placeholder">
+        <h2>ADS-B aircraft</h2>
+        <p>Live aircraft positions and stats from 1090 MHz.</p>
+        <p class="muted">Activates once the dongle (and a 1090 MHz antenna) are connected.</p>
+      </div>
+    </section>
+
+    <section id="sensors" class="panel">
+      <div class="placeholder">
+        <h2>433 MHz sensors</h2>
+        <p>Decodes wireless weather/home sensors into live readings.</p>
+        <p class="muted">Activates once the dongle is connected. Bridges into the weather station.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span class="muted">Only one SDR mode can run at a time — the receiver listens to one frequency.</span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
