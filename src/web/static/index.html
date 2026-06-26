@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>sha-pi station</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -47,10 +48,22 @@
     </section>
 
     <section id="adsb" class="panel">
-      <div class="placeholder">
-        <h2>ADS-B aircraft</h2>
-        <p>Live aircraft positions and stats from 1090 MHz.</p>
-        <p class="muted">Activates once the dongle (and a 1090 MHz antenna) are connected.</p>
+      <div id="adsb-banner" class="banner hidden">
+        SIMULATED DATA — no dongle/decoder yet. Synthetic aircraft to exercise the map; the real
+        1090 MHz feed (dump1090) drops in once the dongle and antenna are connected.
+      </div>
+      <div class="adsb-head">
+        <span id="adsb-count" class="muted">0 aircraft</span>
+        <span id="adsb-state" class="muted"></span>
+      </div>
+      <div class="adsb-layout">
+        <div id="map"></div>
+        <div id="adsb-table-wrap">
+          <table id="adsb-table">
+            <thead><tr><th>Flight</th><th>Alt (ft)</th><th>Speed (kt)</th><th>Trk</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -67,6 +80,7 @@
     <span class="muted">Only one SDR mode can run at a time — the receiver listens to one frequency.</span>
   </footer>
 
+  <script src="/vendor/leaflet/leaflet.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@ let activeTab = "system";
 let systemTimer = null;
 
 // SDR modes a tab maps to (tabs not listed need no receiver).
-const SDR_TAB_MODE = { spectrum: "spectrum" };
+const SDR_TAB_MODE = { spectrum: "spectrum", adsb: "adsb" };
 
 // ----- formatting helpers -------------------------------------------------- //
 function fmtBytes(n) {
@@ -30,33 +30,117 @@ function fmtUptime(s) {
 function fmtMHz(hz) { return (hz / 1e6).toFixed(3) + " MHz"; }
 
 // ----- system tab ---------------------------------------------------------- //
-function card(title, value, sub, barPercent) {
-  const bar = barPercent != null
-    ? `<div class="bar"><span style="width:${Math.min(100, barPercent)}%"></span></div>`
-    : "";
-  return `<div class="card"><h3>${title}</h3><div class="value">${value}</div>`
-    + (sub ? `<div class="sub">${sub}</div>` : "") + bar + `</div>`;
+const MAXPTS = 60;                 // ~2 min of history at 2s polling
+const HIST = { cpu: [], mem: [], temp: [], power: [] };
+let systemBuilt = false;
+
+function pushHist(key, value) {
+  if (value == null) return;
+  const a = HIST[key];
+  a.push(value);
+  if (a.length > MAXPTS) a.shift();
+}
+
+// Task-manager style sparkline: filled area under a line, newest sample at the right.
+function drawSpark(canvas, data, color, lo, hi) {
+  fitCanvasWidth(canvas);
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (data.length < 2) return;
+  let mn = lo, mx = hi;
+  if (mn == null) {
+    mn = Math.min(...data); mx = Math.max(...data);
+    const pad = (mx - mn) * 0.2 || 1; mn -= pad; mx += pad;
+  }
+  const span = (mx - mn) || 1;
+  const xat = i => ((MAXPTS - data.length + i) / (MAXPTS - 1)) * w;
+  const yat = v => h - ((v - mn) / span) * (h - 3) - 1.5;
+  const pts = data.map((v, i) => [xat(i), yat(v)]);
+
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], h);
+  pts.forEach(p => ctx.lineTo(p[0], p[1]));
+  ctx.lineTo(pts[pts.length - 1][0], h);
+  ctx.closePath();
+  ctx.fillStyle = color + "22";
+  ctx.fill();
+
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function metricCard(key, title) {
+  return `<div class="card"><h3>${title}</h3>`
+    + `<div class="value" id="v-${key}">-</div>`
+    + `<div class="sub" id="s-${key}"></div>`
+    + `<canvas class="spark" id="spark-${key}" height="40"></canvas></div>`;
+}
+
+function plainCard(key, title, withBar) {
+  const bar = withBar ? `<div class="bar"><span id="bar-${key}"></span></div>` : "";
+  return `<div class="card"><h3>${title}</h3>`
+    + `<div class="value" id="v-${key}">-</div>`
+    + `<div class="sub" id="s-${key}"></div>${bar}</div>`;
+}
+
+function buildSystemCards() {
+  document.getElementById("system-cards").innerHTML = [
+    plainCard("host", "Host"),
+    plainCard("net", "Network"),
+    metricCard("cpu", "CPU"),
+    metricCard("temp", "CPU temp"),
+    metricCard("mem", "Memory"),
+    metricCard("power", "Power"),
+    plainCard("disk", "Disk (/)", true),
+    plainCard("uptime", "Uptime"),
+  ].join("");
+  systemBuilt = true;
+}
+
+function setText(id, text) { const el = document.getElementById(id); if (el) el.innerHTML = text; }
+
+function updateSystemCards(d) {
+  const addrs = d.addresses.map(a => `${a.address} (${a.interface})`).join(", ") || "-";
+  const load = d.load_avg.map(x => x == null ? "-" : x.toFixed(2)).join(" / ");
+
+  setText("v-host", d.hostname); setText("s-host", `${d.os} (${d.machine})`);
+  setText("v-net", addrs); setText("s-net", "IPv4 addresses");
+  setText("v-cpu", `${d.cpu_percent.toFixed(0)}%`); setText("s-cpu", `${d.cpu_count} cores · load ${load}`);
+  setText("v-temp", d.cpu_temp_c == null ? "n/a" : `${d.cpu_temp_c} &deg;C`);
+  setText("v-mem", `${d.memory.percent.toFixed(0)}%`);
+  setText("s-mem", `${fmtBytes(d.memory.used)} / ${fmtBytes(d.memory.total)}`);
+  setText("v-power", d.power_watts == null ? "n/a" : `${d.power_watts.toFixed(2)} W`);
+  setText("v-disk", `${d.disk.percent.toFixed(0)}%`);
+  setText("s-disk", `${fmtBytes(d.disk.used)} / ${fmtBytes(d.disk.total)}`);
+  const db = document.getElementById("bar-disk"); if (db) db.style.width = `${Math.min(100, d.disk.percent)}%`;
+  setText("v-uptime", fmtUptime(d.uptime_seconds));
+
+  pushHist("cpu", d.cpu_percent);
+  pushHist("mem", d.memory.percent);
+  pushHist("temp", d.cpu_temp_c);
+  pushHist("power", d.power_watts);
+
+  drawSpark(document.getElementById("spark-cpu"), HIST.cpu, "#4cc2ff", 0, 100);
+  drawSpark(document.getElementById("spark-mem"), HIST.mem, "#3fb950", 0, 100);
+  drawSpark(document.getElementById("spark-temp"), HIST.temp, "#f0883e");
+  drawSpark(document.getElementById("spark-power"), HIST.power, "#d2a8ff");
 }
 
 async function loadSystem() {
   try {
     const r = await fetch("/api/system");
     const d = await r.json();
-    const addrs = d.addresses.map(a => `${a.address} (${a.interface})`).join(", ") || "-";
-    const load = d.load_avg.map(x => x == null ? "-" : x.toFixed(2)).join(" / ");
-    const temp = d.cpu_temp_c == null ? "-" : `${d.cpu_temp_c} &deg;C`;
-    document.getElementById("system-cards").innerHTML = [
-      card("Host", d.hostname, `${d.os} (${d.machine})`),
-      card("Network", addrs, "IPv4 addresses"),
-      card("CPU", `${d.cpu_percent.toFixed(0)}%`, `${d.cpu_count} cores · load ${load}`, d.cpu_percent),
-      card("CPU temp", temp, ""),
-      card("Memory", `${d.memory.percent.toFixed(0)}%`, `${fmtBytes(d.memory.used)} / ${fmtBytes(d.memory.total)}`, d.memory.percent),
-      card("Disk (/)", `${d.disk.percent.toFixed(0)}%`, `${fmtBytes(d.disk.used)} / ${fmtBytes(d.disk.total)}`, d.disk.percent),
-      card("Uptime", fmtUptime(d.uptime_seconds), ""),
-    ].join("");
+    if (!systemBuilt) buildSystemCards();
+    updateSystemCards(d);
   } catch (e) {
-    document.getElementById("system-cards").innerHTML =
-      `<p class="muted">Failed to load system info: ${e}</p>`;
+    if (!systemBuilt) {
+      document.getElementById("system-cards").innerHTML =
+        `<p class="muted">Failed to load system info: ${e}</p>`;
+    }
   }
 }
 
@@ -155,6 +239,68 @@ function setSpectrumState(mode, simulated) {
   else el.textContent = "stopped";
 }
 
+// ----- ADS-B map ----------------------------------------------------------- //
+let map = null, homeMarker = null;
+let rxLat = 50.05, rxLon = 8.60;
+const planeMarkers = {};
+
+function planeIcon(track) {
+  // Plane silhouette pointing north, rotated by heading.
+  const path = "M12 2 L13 9 L21 14 L21 16 L13 12 L13 19 L16 21 L16 22 L12 20 "
+    + "L8 22 L8 21 L11 19 L11 12 L3 16 L3 14 L11 9 Z";
+  return L.divIcon({
+    className: "",
+    html: `<svg class="plane-icon" width="22" height="22" viewBox="0 0 24 24" `
+      + `style="transform:rotate(${track}deg)"><path fill="currentColor" d="${path}"/></svg>`,
+    iconSize: [22, 22], iconAnchor: [11, 11],
+  });
+}
+
+function initMap() {
+  if (map) return;
+  map = L.map("map", { zoomControl: true }).setView([rxLat, rxLon], 7);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18, attribution: "&copy; OpenStreetMap contributors",
+  }).addTo(map);
+  homeMarker = L.circleMarker([rxLat, rxLon], {
+    radius: 5, color: "#f0883e", fillColor: "#f0883e", fillOpacity: 1,
+  }).addTo(map).bindTooltip("Receiver");
+}
+
+function setAdsbState(simulated) {
+  document.getElementById("adsb-banner").classList.toggle("hidden", !simulated);
+  document.getElementById("adsb-state").textContent = simulated ? "live (simulated)" : "live";
+}
+
+function renderAdsb(frame) {
+  if (!map) return;
+  const seen = {};
+  (frame.aircraft || []).forEach(a => {
+    if (a.lat == null || a.lon == null) return;
+    seen[a.hex] = true;
+    let m = planeMarkers[a.hex];
+    if (!m) {
+      m = L.marker([a.lat, a.lon], { icon: planeIcon(a.track) }).addTo(map);
+      m.bindTooltip("");
+      planeMarkers[a.hex] = m;
+    } else {
+      m.setLatLng([a.lat, a.lon]);
+      m.setIcon(planeIcon(a.track));
+    }
+    m.setTooltipContent(`${a.flight || a.hex} · ${a.alt} ft · ${a.gs} kt`);
+  });
+  for (const hex in planeMarkers) {
+    if (!seen[hex]) { map.removeLayer(planeMarkers[hex]); delete planeMarkers[hex]; }
+  }
+
+  const tbody = document.querySelector("#adsb-table tbody");
+  tbody.innerHTML = (frame.aircraft || []).map(a =>
+    `<tr><td>${a.flight || a.hex}</td><td>${a.alt}</td><td>${a.gs}</td>`
+    + `<td>${Math.round(a.track)}&deg;</td></tr>`).join("");
+  document.getElementById("adsb-count").textContent =
+    `${(frame.aircraft || []).length} aircraft`;
+}
+
 // ----- websocket ----------------------------------------------------------- //
 let ws = null;
 let currentMode = null, currentSim = false;
@@ -166,12 +312,23 @@ function connectWs() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "mode") {
       currentMode = msg.mode; currentSim = msg.simulated;
+      if (msg.rx) {
+        rxLat = msg.rx.lat; rxLon = msg.rx.lon;
+        if (homeMarker) homeMarker.setLatLng([rxLat, rxLon]);
+      }
       setSpectrumState(msg.mode, msg.simulated);
+      setAdsbState(msg.mode === "adsb" && msg.simulated);
     } else if (msg.type === "frame" && msg.mode === "spectrum") {
       currentSim = msg.simulated;
       if (activeTab === "spectrum") {
         setSpectrumState("spectrum", msg.simulated);
         renderSpectrum(msg);
+      }
+    } else if (msg.type === "frame" && msg.mode === "adsb") {
+      currentSim = msg.simulated;
+      if (activeTab === "adsb") {
+        setAdsbState(msg.simulated);
+        renderAdsb(msg);
       }
     }
   };
@@ -200,6 +357,10 @@ function setTab(name) {
     systemTimer = setInterval(loadSystem, 2000);
   } else if (name === "sdr") {
     loadSdr();
+  } else if (name === "adsb") {
+    initMap();
+    // The map container was just shown; let Leaflet recompute its size.
+    setTimeout(() => map && map.invalidateSize(), 50);
   }
 }
 

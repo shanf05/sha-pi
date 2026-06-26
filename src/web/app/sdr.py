@@ -28,6 +28,11 @@ RTL_POWER = "rtl_power"
 # Frequency range scanned by the spectrum mode: "start:stop:step" (default FM band).
 SPECTRUM_RANGE = os.environ.get("SHAPI_SPECTRUM_RANGE", "88M:108M:50k")
 
+# Receiver location, used to centre the ADS-B map and (later) compute range.
+# Defaults to a central spot for the simulation; set to your real location.
+RX_LAT = float(os.environ.get("SHAPI_RX_LAT", "50.05"))
+RX_LON = float(os.environ.get("SHAPI_RX_LON", "8.60"))
+
 
 # --------------------------------------------------------------------------- #
 # Device status probe
@@ -135,7 +140,7 @@ class SpectrumAssembler:
 class SdrController:
     """Owns the dongle and runs at most one streaming mode at a time."""
 
-    MODES = ("spectrum",)
+    MODES = ("spectrum", "adsb")
 
     def __init__(self, broadcast):
         # broadcast: async callable taking a JSON-serialisable dict.
@@ -148,6 +153,7 @@ class SdrController:
         self.latest_frame = None
         f_start, f_stop, _step, n_bins = parse_range(SPECTRUM_RANGE)
         self._meta = {"f_start": f_start, "f_stop": f_stop, "n_bins": n_bins}
+        self._rx = {"lat": RX_LAT, "lon": RX_LON}
 
     def state(self):
         return {
@@ -155,6 +161,7 @@ class SdrController:
             "mode": self.mode,
             "simulated": self.simulated,
             "meta": self._meta,
+            "rx": self._rx,
         }
 
     async def set_mode(self, name):
@@ -174,6 +181,11 @@ class SdrController:
                 self.simulated = not status.get("available", False)
                 runner = self._run_spectrum_real if not self.simulated else self._run_spectrum_sim
                 self._task = asyncio.create_task(self._guard(runner()))
+            elif name == "adsb":
+                # Real path (dump1090) is added in the ADS-B hardware phase; until
+                # then ADS-B always runs simulated.
+                self.simulated = True
+                self._task = asyncio.create_task(self._guard(self._run_adsb_sim()))
             await self._broadcast(self.state())
             return self.state()
 
@@ -209,7 +221,7 @@ class SdrController:
             await self._broadcast({"type": "error", "mode": self.mode, "message": str(exc)})
 
     async def _emit(self, frame):
-        msg = {"type": "frame", "mode": "spectrum", "simulated": self.simulated, "ts": time.time()}
+        msg = {"type": "frame", "mode": self.mode, "simulated": self.simulated, "ts": time.time()}
         msg.update(frame)
         self.latest_frame = msg
         await self._broadcast(msg)
@@ -249,6 +261,44 @@ class SdrController:
                     pk["drift"] *= -1
             await self._emit({"f_start": f_start, "f_stop": f_stop, "bins": bins})
             await asyncio.sleep(0.5)
+
+    async def _run_adsb_sim(self):
+        """Synthetic aircraft drifting around the receiver. Clearly flagged simulated.
+
+        Mirrors the fields dump1090 exposes (hex, flight, lat, lon, alt, gs, track)
+        so the real path can drop in unchanged later.
+        """
+        lat0, lon0 = self._rx["lat"], self._rx["lon"]
+        airlines = ["DLH", "BAW", "RYR", "EZY", "AFR", "KLM", "SWR", "WZZ"]
+        planes = []
+        for _ in range(7):
+            planes.append({
+                "hex": "%06x" % random.randint(0, 0xFFFFFF),
+                "flight": random.choice(airlines) + str(random.randint(100, 999)),
+                "lat": lat0 + random.uniform(-1.3, 1.3),
+                "lon": lon0 + random.uniform(-1.9, 1.9),
+                "alt": random.randint(3000, 39000),
+                "gs": random.randint(280, 500),
+                "track": random.uniform(0, 360),
+            })
+        while True:
+            for p in planes:
+                # gs is knots (nm/h); convert to degrees travelled this second.
+                step_nm = p["gs"] / 3600.0
+                p["lat"] += step_nm / 60.0 * math.cos(math.radians(p["track"]))
+                p["lon"] += (step_nm / 60.0 * math.sin(math.radians(p["track"]))
+                             / max(0.1, math.cos(math.radians(p["lat"]))))
+                p["track"] = (p["track"] + random.uniform(-2, 2)) % 360
+                # turn back toward the centre if it drifts too far away
+                if abs(p["lat"] - lat0) > 2.2 or abs(p["lon"] - lon0) > 3.2:
+                    p["track"] = (p["track"] + 180) % 360
+            aircraft = [{
+                "hex": p["hex"], "flight": p["flight"],
+                "lat": round(p["lat"], 4), "lon": round(p["lon"], 4),
+                "alt": p["alt"], "gs": p["gs"], "track": round(p["track"]),
+            } for p in planes]
+            await self._emit({"aircraft": aircraft, "stats": {"count": len(aircraft)}})
+            await asyncio.sleep(1.0)
 
 
 # --------------------------------------------------------------------------- #

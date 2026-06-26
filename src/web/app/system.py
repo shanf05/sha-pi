@@ -1,10 +1,40 @@
 """System health information for the dashboard (no SDR hardware required)."""
 
 import os
+import re
 import socket
+import subprocess
 import time
 
 import psutil
+
+# rtl_power-style line: "<RAIL>_A current(0)=0.096A" / "<RAIL>_V volt(8)=3.70V"
+_PMIC_LINE = re.compile(r"(\S+?)_(A|V)\s+\w+\(\d+\)=([0-9.]+)")
+
+
+def _power_watts():
+    """Total board power on a Pi 5, summed from the PMIC rails (volts x amps).
+
+    Returns watts, or None if vcgencmd/PMIC is unavailable (e.g. non-Pi-5).
+    """
+    try:
+        out = subprocess.run(
+            ["vcgencmd", "pmic_read_adc"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+
+    rails = {}
+    for base, kind, val in _PMIC_LINE.findall(out):
+        rails.setdefault(base, {})[kind] = float(val)
+    total = 0.0
+    found = False
+    for r in rails.values():
+        if "A" in r and "V" in r:
+            total += r["A"] * r["V"]
+            found = True
+    return round(total, 2) if found else None
 
 
 def _cpu_temp_c():
@@ -45,6 +75,7 @@ def get_system_info():
         "cpu_percent": psutil.cpu_percent(interval=None),
         "cpu_count": psutil.cpu_count(),
         "cpu_temp_c": _cpu_temp_c(),
+        "power_watts": _power_watts(),
         "load_avg": load_avg,
         "memory": {"used": vm.used, "total": vm.total, "percent": vm.percent},
         "disk": {"used": disk.used, "total": disk.total, "percent": disk.percent},
