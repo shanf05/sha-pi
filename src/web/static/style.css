@@ -200,3 +200,34 @@ footer {
 
 .plane-icon { color: var(--accent); transform-origin: center; }
 .leaflet-container { background: #0b0f14; }
+
+.sensors-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.sensor-card h3 {
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.95rem;
+}
+.sensor-readings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.1rem;
+  margin: 0.4rem 0 0.6rem;
+}
+.reading { display: flex; flex-direction: column; }
+.r-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.r-value { font-size: 1.2rem; font-weight: 600; }
+.batt.good { color: var(--good); }
+.batt.bad { color: var(--bad); }
+.sensor-card.stale { opacity: 0.5; }

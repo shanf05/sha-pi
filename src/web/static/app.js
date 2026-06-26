@@ -4,7 +4,7 @@ let activeTab = "system";
 let systemTimer = null;
 
 // SDR modes a tab maps to (tabs not listed need no receiver).
-const SDR_TAB_MODE = { spectrum: "spectrum", adsb: "adsb" };
+const SDR_TAB_MODE = { spectrum: "spectrum", adsb: "adsb", sensors: "sensors" };
 
 // ----- formatting helpers -------------------------------------------------- //
 function fmtBytes(n) {
@@ -325,6 +325,78 @@ function renderAdsb(frame) {
     `${(frame.aircraft || []).length} aircraft`;
 }
 
+// ----- 433 MHz sensors ----------------------------------------------------- //
+let sensorsFreqHz = null;
+
+// rtl_433 JSON field name -> [label, unit]. Unknown fields fall back to a
+// humanised key with no unit, so new device types still render.
+const SENSOR_FIELDS = {
+  temperature_C: ["Temp", "°C"], temperature_F: ["Temp", "°F"],
+  humidity: ["Humidity", "%"], pressure_hPa: ["Pressure", "hPa"],
+  pressure_kPa: ["Pressure", "kPa"], wind_avg_km_h: ["Wind", "km/h"],
+  wind_max_km_h: ["Gust", "km/h"], wind_dir_deg: ["Dir", "°"],
+  rain_mm: ["Rain", "mm"], moisture: ["Moisture", "%"],
+  light_lux: ["Light", "lux"], uv: ["UV", ""], co2_ppm: ["CO2", "ppm"],
+  power_W: ["Power", "W"], setpoint_C: ["Setpoint", "°C"],
+};
+
+function fmtSensorField(key, val) {
+  const meta = SENSOR_FIELDS[key];
+  const label = meta ? meta[0] : key.replace(/_/g, " ");
+  const unit = meta ? meta[1] : "";
+  let v = val;
+  if (typeof v === "number") v = Number.isInteger(v) ? v : v.toFixed(1);
+  return `<div class="reading"><span class="r-label">${label}</span>`
+    + `<span class="r-value">${v}${unit ? " " + unit : ""}</span></div>`;
+}
+
+function fmtAge(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return `${sec}s ago`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
+}
+
+function setSensorsState(simulated) {
+  document.getElementById("sensors-banner").classList.toggle("hidden", !simulated);
+  document.getElementById("sensors-state").textContent = simulated ? "live (simulated)" : "live";
+}
+
+function renderSensors(frame) {
+  const grid = document.getElementById("sensors-grid");
+  const sensors = frame.sensors || [];
+  const now = frame.ts || Date.now() / 1000;
+
+  if (!sensors.length) {
+    grid.innerHTML = `<p class="muted">Waiting for the first 433 MHz transmission…</p>`;
+  } else {
+    grid.innerHTML = sensors.map(s => {
+      const fields = s.fields || {};
+      const readings = Object.keys(fields).map(k => fmtSensorField(k, fields[k])).join("")
+        || `<div class="reading muted">no fields</div>`;
+      const bits = [];
+      if (s.channel != null) bits.push(`ch ${s.channel}`);
+      if (s.id != null) bits.push(`id ${s.id}`);
+      if (s.battery_ok != null) {
+        bits.push(s.battery_ok ? `<span class="batt good">batt OK</span>`
+                               : `<span class="batt bad">batt low</span>`);
+      }
+      bits.push(fmtAge(now - s.last_seen));
+      bits.push(`${s.count}&times;`);
+      const stale = (now - s.last_seen) > 120 ? " stale" : "";
+      return `<div class="card sensor-card${stale}"><h3>${s.model || s.key}</h3>`
+        + `<div class="sensor-readings">${readings}</div>`
+        + `<div class="sub">${bits.join(" · ")}</div></div>`;
+    }).join("");
+  }
+
+  const events = frame.stats ? frame.stats.events : 0;
+  const freq = sensorsFreqHz ? ` · ${fmtMHz(sensorsFreqHz)}` : "";
+  document.getElementById("sensors-summary").textContent =
+    `${sensors.length} sensor${sensors.length === 1 ? "" : "s"} · ${events} events${freq}`;
+}
+
 // ----- websocket ----------------------------------------------------------- //
 let ws = null;
 let currentMode = null, currentSim = false;
@@ -340,8 +412,10 @@ function connectWs() {
         rxLat = msg.rx.lat; rxLon = msg.rx.lon;
         if (homeMarker) homeMarker.setLatLng([rxLat, rxLon]);
       }
+      if (msg.meta && msg.meta.sensors_freq) sensorsFreqHz = msg.meta.sensors_freq;
       setSpectrumState(msg.mode, msg.simulated);
       setAdsbState(msg.mode === "adsb" && msg.simulated);
+      setSensorsState(msg.mode === "sensors" && msg.simulated);
     } else if (msg.type === "frame" && msg.mode === "spectrum") {
       currentSim = msg.simulated;
       if (activeTab === "spectrum") {
@@ -353,6 +427,12 @@ function connectWs() {
       if (activeTab === "adsb") {
         setAdsbState(msg.simulated);
         renderAdsb(msg);
+      }
+    } else if (msg.type === "frame" && msg.mode === "sensors") {
+      currentSim = msg.simulated;
+      if (activeTab === "sensors") {
+        setSensorsState(msg.simulated);
+        renderSensors(msg);
       }
     }
   };

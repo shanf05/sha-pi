@@ -22,6 +22,7 @@ RUN_USER="$(id -un)"
 RX_LAT="${SHAPI_RX_LAT:-50.05}"          # ADS-B map: receiver latitude
 RX_LON="${SHAPI_RX_LON:-8.60}"           # ADS-B map: receiver longitude
 SPECTRUM_RANGE="${SHAPI_SPECTRUM_RANGE:-88M:108M:50k}"  # spectrum sweep start:stop:step
+RTL433_FREQ="${SHAPI_RTL433_FREQ:-433.92M}"  # 433 MHz sensor mode listen frequency
 
 if [[ $EUID -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
 
@@ -49,6 +50,7 @@ ExecStart=$VENV/bin/uvicorn app.main:app --host 0.0.0.0 --port 80
 Environment=SHAPI_RX_LAT=$RX_LAT
 Environment=SHAPI_RX_LON=$RX_LON
 Environment=SHAPI_SPECTRUM_RANGE=$SPECTRUM_RANGE
+Environment=SHAPI_RTL433_FREQ=$RTL433_FREQ
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=3

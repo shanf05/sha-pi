@@ -15,6 +15,7 @@ isolation (`python3 app/sdr.py --selftest`).
 """
 
 import asyncio
+import json
 import math
 import os
 import random
@@ -24,9 +25,14 @@ import time
 
 RTL_TEST = "rtl_test"
 RTL_POWER = "rtl_power"
+RTL_433 = "rtl_433"
 
 # Frequency range scanned by the spectrum mode: "start:stop:step" (default FM band).
 SPECTRUM_RANGE = os.environ.get("SHAPI_SPECTRUM_RANGE", "88M:108M:50k")
+
+# Frequency rtl_433 listens on for the 433 MHz sensor mode (433.92 MHz ISM by default;
+# set to 868M for European 868 MHz devices).
+RTL433_FREQ = os.environ.get("SHAPI_RTL433_FREQ", "433.92M")
 
 # Receiver location, used to centre the ADS-B map and (later) compute range.
 # Defaults to a central spot for the simulation; set to your real location.
@@ -135,12 +141,68 @@ class SpectrumAssembler:
 
 
 # --------------------------------------------------------------------------- #
+# 433 MHz sensor decoding (pure / testable)
+# --------------------------------------------------------------------------- #
+# rtl_433 JSON keys that identify/annotate a record rather than being a reading.
+# Everything else in a record is treated as a live measurement field.
+_RTL433_META = {
+    "time", "model", "id", "channel", "subtype", "type", "mic", "mod",
+    "freq", "freq1", "freq2", "rssi", "snr", "noise", "protocol",
+    "sequence_num", "battery_ok",
+}
+
+
+class Rtl433Aggregator:
+    """Folds the stream of rtl_433 JSON events into a live per-device table.
+
+    rtl_433 emits one JSON object per decoded packet, and a given sensor
+    re-transmits every few seconds. We key on model/id/channel and keep, per
+    device, the latest measurement fields, a last-seen time and an event count,
+    so the UI shows one row per physical sensor instead of a raw event log.
+    """
+
+    def __init__(self):
+        self._sensors = {}
+
+    @staticmethod
+    def key_of(rec):
+        parts = [str(rec.get("model", "unknown"))]
+        if rec.get("id") is not None:
+            parts.append("id" + str(rec["id"]))
+        if rec.get("channel") is not None:
+            parts.append("ch" + str(rec["channel"]))
+        return "/".join(parts)
+
+    def feed(self, rec, ts):
+        """Fold one decoded record (a dict) seen at time `ts`; returns its entry."""
+        key = self.key_of(rec)
+        fields = {k: v for k, v in rec.items() if k not in _RTL433_META}
+        entry = self._sensors.get(key)
+        if entry is None:
+            entry = {
+                "key": key, "model": rec.get("model"),
+                "id": rec.get("id"), "channel": rec.get("channel"),
+                "first_seen": ts, "count": 0,
+            }
+            self._sensors[key] = entry
+        entry["fields"] = fields
+        if "battery_ok" in rec:
+            entry["battery_ok"] = rec["battery_ok"]
+        entry["last_seen"] = ts
+        entry["count"] += 1
+        return entry
+
+    def snapshot(self):
+        return sorted(self._sensors.values(), key=lambda e: e["key"])
+
+
+# --------------------------------------------------------------------------- #
 # Controller
 # --------------------------------------------------------------------------- #
 class SdrController:
     """Owns the dongle and runs at most one streaming mode at a time."""
 
-    MODES = ("spectrum", "adsb")
+    MODES = ("spectrum", "adsb", "sensors")
 
     def __init__(self, broadcast):
         # broadcast: async callable taking a JSON-serialisable dict.
@@ -152,7 +214,10 @@ class SdrController:
         self.simulated = False
         self.latest_frame = None
         f_start, f_stop, _step, n_bins = parse_range(SPECTRUM_RANGE)
-        self._meta = {"f_start": f_start, "f_stop": f_stop, "n_bins": n_bins}
+        self._meta = {
+            "f_start": f_start, "f_stop": f_stop, "n_bins": n_bins,
+            "sensors_freq": _to_hz(RTL433_FREQ),
+        }
         self._rx = {"lat": RX_LAT, "lon": RX_LON}
 
     def state(self):
@@ -186,6 +251,11 @@ class SdrController:
                 # then ADS-B always runs simulated.
                 self.simulated = True
                 self._task = asyncio.create_task(self._guard(self._run_adsb_sim()))
+            elif name == "sensors":
+                status = await asyncio.to_thread(get_status)
+                self.simulated = not status.get("available", False)
+                runner = self._run_sensors_real if not self.simulated else self._run_sensors_sim
+                self._task = asyncio.create_task(self._guard(runner()))
             await self._broadcast(self.state())
             return self.state()
 
@@ -300,6 +370,81 @@ class SdrController:
             await self._emit({"aircraft": aircraft, "stats": {"count": len(aircraft)}})
             await asyncio.sleep(1.0)
 
+    async def _run_sensors_real(self):
+        """Decode 433/868 MHz sensors with rtl_433's line-buffered JSON output.
+
+        rtl_433 prints one JSON object per decoded packet on stdout (status text
+        goes to stderr, which we drop). Each line is folded into the per-device
+        table and the whole snapshot is streamed to the browser.
+        """
+        self._proc = await asyncio.create_subprocess_exec(
+            RTL_433, "-f", RTL433_FREQ, "-F", "json",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        agg = Rtl433Aggregator()
+        events = 0
+        while True:
+            line = await self._proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace").strip()
+            if not text.startswith("{"):
+                continue
+            try:
+                rec = json.loads(text)
+            except ValueError:
+                continue
+            agg.feed(rec, time.time())
+            events += 1
+            snap = agg.snapshot()
+            await self._emit({"sensors": snap, "stats": {"count": len(snap), "events": events}})
+
+    async def _run_sensors_sim(self):
+        """Synthetic 433 MHz sensor traffic. Clearly flagged simulated.
+
+        Emits rtl_433-shaped records (model/id/channel + measurement fields) for a
+        small stable fleet whose values random-walk, so the real `rtl_433 -F json`
+        path drops in unchanged. Each device re-transmits at a random interval,
+        just like real ISM-band sensors.
+        """
+        agg = Rtl433Aggregator()
+        events = 0
+        # (base record, {field: (max step, lo, hi)} for the random walk)
+        devices = [
+            ({"model": "Acurite-Tower", "id": 4231, "channel": 1,
+              "temperature_C": 21.5, "humidity": 47, "battery_ok": 1},
+             {"temperature_C": (0.2, 18, 26), "humidity": (1, 35, 65)}),
+            ({"model": "Nexus-TH", "id": 113, "channel": 2,
+              "temperature_C": 5.4, "humidity": 82, "battery_ok": 1},
+             {"temperature_C": (0.3, -2, 12), "humidity": (1.5, 60, 95)}),
+            ({"model": "Bresser-5in1", "id": 88,
+              "temperature_C": 19.8, "humidity": 53, "wind_avg_km_h": 12.0,
+              "wind_max_km_h": 21.0, "wind_dir_deg": 210, "rain_mm": 4.2,
+              "battery_ok": 1},
+             {"temperature_C": (0.2, 12, 28), "humidity": (1, 40, 70),
+              "wind_avg_km_h": (1.5, 0, 40), "wind_max_km_h": (2, 0, 60),
+              "wind_dir_deg": (8, 0, 359)}),
+            ({"model": "LaCrosse-TX29", "id": 27,
+              "temperature_C": 22.1, "battery_ok": 0},  # low-battery example
+             {"temperature_C": (0.15, 18, 25)}),
+            ({"model": "Prologue-TH", "id": 201, "channel": 3,
+              "temperature_C": -3.2, "humidity": 90, "battery_ok": 1},
+             {"temperature_C": (0.25, -8, 4), "humidity": (1, 70, 99)}),
+        ]
+        while True:
+            base, walk = random.choice(devices)
+            for field, (step, lo, hi) in walk.items():
+                val = max(lo, min(hi, base[field] + random.uniform(-step, step)))
+                base[field] = round(val, 1) if isinstance(base[field], float) else round(val)
+            # Rain only ever accumulates.
+            if "rain_mm" in base:
+                base["rain_mm"] = round(base["rain_mm"] + random.uniform(0, 0.2), 1)
+            agg.feed(dict(base), time.time())
+            events += 1
+            snap = agg.snapshot()
+            await self._emit({"sensors": snap, "stats": {"count": len(snap), "events": events}})
+            await asyncio.sleep(random.uniform(0.6, 1.8))
+
 
 # --------------------------------------------------------------------------- #
 # Self-test for the pure parsing logic (no hardware, no web framework)
@@ -317,6 +462,24 @@ def _selftest():
     frame = asm.feed("2026-01-01, 00:00:02, 88000000, 90000000, 1000000, 10, -31, -30")
     assert frame == {"f_start": 88000000, "f_stop": 92000000,
                      "bins": [-30, -29, -28, -27]}, frame
+
+    agg = Rtl433Aggregator()
+    e1 = agg.feed({"model": "Nexus-TH", "id": 113, "channel": 2,
+                   "temperature_C": 5.4, "humidity": 82, "battery_ok": 1}, 100.0)
+    assert e1["key"] == "Nexus-TH/id113/ch2", e1["key"]
+    assert e1["fields"] == {"temperature_C": 5.4, "humidity": 82}, e1["fields"]
+    assert e1["battery_ok"] == 1 and e1["count"] == 1
+    # a retransmit of the same device updates in place (not a new row)
+    agg.feed({"model": "Nexus-TH", "id": 113, "channel": 2,
+              "temperature_C": 5.6, "humidity": 81, "battery_ok": 1}, 130.0)
+    # a different device is a separate row
+    agg.feed({"model": "Acurite-Tower", "id": 4231, "channel": 1,
+              "temperature_C": 21.5, "battery_ok": 1}, 131.0)
+    snap = agg.snapshot()
+    assert len(snap) == 2, snap
+    nexus = next(s for s in snap if s["key"] == "Nexus-TH/id113/ch2")
+    assert nexus["count"] == 2 and nexus["fields"]["temperature_C"] == 5.6
+    assert nexus["last_seen"] == 130.0 and nexus["first_seen"] == 100.0
     print("sdr selftest: OK")
 
 

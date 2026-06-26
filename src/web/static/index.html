@@ -68,10 +68,16 @@
     </section>
 
     <section id="sensors" class="panel">
-      <div class="placeholder">
-        <h2>433 MHz sensors</h2>
-        <p>Decodes wireless weather/home sensors into live readings.</p>
-        <p class="muted">Activates once the dongle is connected. Bridges into the weather station.</p>
+      <div id="sensors-banner" class="banner hidden">
+        SIMULATED DATA — no dongle detected. Synthetic 433 MHz sensor traffic to exercise the
+        pipeline; real readings appear via rtl_433 once the dongle and antenna are connected.
+      </div>
+      <div class="sensors-head">
+        <span id="sensors-summary" class="muted">0 sensors</span>
+        <span id="sensors-state" class="muted"></span>
+      </div>
+      <div class="cards" id="sensors-grid">
+        <p class="muted">Waiting for the first 433 MHz transmission…</p>
       </div>
     </section>
   </main>
