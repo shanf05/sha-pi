@@ -3,6 +3,10 @@
 let activeTab = "system";
 let systemTimer = null;
 
+// SDR modes a tab maps to (tabs not listed need no receiver).
+const SDR_TAB_MODE = { spectrum: "spectrum" };
+
+// ----- formatting helpers -------------------------------------------------- //
 function fmtBytes(n) {
   if (n == null) return "-";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -23,6 +27,9 @@ function fmtUptime(s) {
   return parts.join(" ");
 }
 
+function fmtMHz(hz) { return (hz / 1e6).toFixed(3) + " MHz"; }
+
+// ----- system tab ---------------------------------------------------------- //
 function card(title, value, sub, barPercent) {
   const bar = barPercent != null
     ? `<div class="bar"><span style="width:${Math.min(100, barPercent)}%"></span></div>`
@@ -53,6 +60,7 @@ async function loadSystem() {
   }
 }
 
+// ----- SDR status tab ------------------------------------------------------ //
 async function loadSdr() {
   const el = document.getElementById("sdr-status");
   el.innerHTML = `<p class="muted">Probing the dongle…</p>`;
@@ -63,6 +71,7 @@ async function loadSdr() {
       ? `<span class="pill good">connected</span>`
       : `<span class="pill bad">not detected</span>`;
     let html = `<p class="status-line">Dongle: ${pill}</p>`;
+    if (d.in_use_by) html += `<p class="status-line">In use by: ${d.in_use_by}${d.simulated ? " (simulated)" : ""}</p>`;
     if (d.device) html += `<p class="status-line">Device: ${d.device}</p>`;
     if (d.tuner) html += `<p class="status-line">Tuner: ${d.tuner}</p>`;
     if (d.error) html += `<p class="status-line muted">${d.error}</p>`;
@@ -73,7 +82,105 @@ async function loadSdr() {
   }
 }
 
+// ----- SDR mode control ---------------------------------------------------- //
+async function setSdrMode(mode) {
+  try {
+    await fetch("/api/sdr/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: mode }),
+    });
+  } catch (e) { /* ignore; the websocket reports state */ }
+}
+
+// ----- spectrum rendering -------------------------------------------------- //
+function dbColor(db) {
+  // Map ~ -35..+10 dB to blue -> cyan -> yellow -> red.
+  const t = Math.max(0, Math.min(1, (db + 35) / 45));
+  const r = Math.floor(255 * Math.min(1, Math.max(0, t * 2 - 0.6)));
+  const g = Math.floor(255 * Math.min(1, Math.max(0, t * 1.8)));
+  const b = Math.floor(255 * Math.min(1, Math.max(0, 1 - t * 1.6)));
+  return `rgb(${r},${g},${b})`;
+}
+
+function fitCanvasWidth(canvas) {
+  const w = canvas.clientWidth || canvas.parentElement.clientWidth;
+  if (w && canvas.width !== w) canvas.width = w;
+}
+
+function renderSpectrum(frame) {
+  const line = document.getElementById("spectrum-line");
+  const wf = document.getElementById("waterfall");
+  fitCanvasWidth(line);
+  fitCanvasWidth(wf);
+  const bins = frame.bins;
+  const n = bins.length;
+  if (!n) return;
+
+  // line chart of the current sweep
+  const lc = line.getContext("2d");
+  lc.clearRect(0, 0, line.width, line.height);
+  lc.strokeStyle = "#4cc2ff";
+  lc.beginPath();
+  let min = Infinity, max = -Infinity;
+  for (const v of bins) { if (v < min) min = v; if (v > max) max = v; }
+  const span = (max - min) || 1;
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * line.width;
+    const y = line.height - ((bins[i] - min) / span) * (line.height - 4) - 2;
+    i === 0 ? lc.moveTo(x, y) : lc.lineTo(x, y);
+  }
+  lc.stroke();
+
+  // waterfall: scroll down one row, draw new row on top
+  const wc = wf.getContext("2d");
+  wc.drawImage(wf, 0, 1);
+  const row = wc.createImageData(wf.width, 1);
+  for (let x = 0; x < wf.width; x++) {
+    const v = bins[Math.floor((x / wf.width) * n)];
+    const c = dbColor(v).match(/\d+/g);
+    const o = x * 4;
+    row.data[o] = +c[0]; row.data[o + 1] = +c[1]; row.data[o + 2] = +c[2]; row.data[o + 3] = 255;
+  }
+  wc.putImageData(row, 0, 0);
+
+  document.getElementById("spectrum-range").textContent =
+    `${fmtMHz(frame.f_start)} – ${fmtMHz(frame.f_stop)} · ${n} bins`;
+}
+
+function setSpectrumState(mode, simulated) {
+  document.getElementById("sim-banner").classList.toggle("hidden", !(mode === "spectrum" && simulated));
+  const el = document.getElementById("spectrum-state");
+  if (mode === "spectrum") el.textContent = simulated ? "live (simulated)" : "live";
+  else el.textContent = "stopped";
+}
+
+// ----- websocket ----------------------------------------------------------- //
+let ws = null;
+let currentMode = null, currentSim = false;
+
+function connectWs() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "mode") {
+      currentMode = msg.mode; currentSim = msg.simulated;
+      setSpectrumState(msg.mode, msg.simulated);
+    } else if (msg.type === "frame" && msg.mode === "spectrum") {
+      currentSim = msg.simulated;
+      if (activeTab === "spectrum") {
+        setSpectrumState("spectrum", msg.simulated);
+        renderSpectrum(msg);
+      }
+    }
+  };
+  ws.onclose = () => { ws = null; setTimeout(connectWs, 2000); };
+}
+
+// ----- tabs ---------------------------------------------------------------- //
 function setTab(name) {
+  const prev = activeTab;
   activeTab = name;
   document.querySelectorAll(".tab").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === name));
@@ -81,6 +188,13 @@ function setTab(name) {
     p.classList.toggle("active", p.id === name));
 
   if (systemTimer) { clearInterval(systemTimer); systemTimer = null; }
+
+  // Start/stop the receiver as we move between SDR tabs.
+  const prevMode = SDR_TAB_MODE[prev];
+  const nextMode = SDR_TAB_MODE[name];
+  if (prevMode && prevMode !== nextMode) setSdrMode("off");
+  if (nextMode) setSdrMode(nextMode);
+
   if (name === "system") {
     loadSystem();
     systemTimer = setInterval(loadSystem, 2000);
@@ -98,4 +212,5 @@ function tick() {
 setInterval(tick, 1000);
 tick();
 
+connectWs();
 setTab("system");

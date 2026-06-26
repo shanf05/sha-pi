@@ -34,11 +34,16 @@
     </section>
 
     <section id="spectrum" class="panel">
-      <div class="placeholder">
-        <h2>Spectrum &amp; waterfall</h2>
-        <p>Sweeps a frequency range and shows what is on the air.</p>
-        <p class="muted">Activates once the RTL-SDR dongle is connected (Phase 2).</p>
+      <div id="sim-banner" class="banner hidden">
+        SIMULATED DATA — no dongle detected. This is synthetic spectrum to exercise the
+        pipeline; it switches to real RF automatically once the dongle is connected.
       </div>
+      <div class="spectrum-head">
+        <span id="spectrum-range" class="muted">range</span>
+        <span id="spectrum-state" class="muted"></span>
+      </div>
+      <canvas id="spectrum-line" height="120"></canvas>
+      <canvas id="waterfall" height="260"></canvas>
     </section>
 
     <section id="adsb" class="panel">

@@ -128,3 +128,30 @@ footer {
 }
 
 .muted { color: var(--muted); }
+.hidden { display: none; }
+
+.banner {
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.spectrum-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+
+#spectrum-line, #waterfall {
+  width: 100%;
+  display: block;
+  background: #0b0f14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+#spectrum-line { margin-bottom: 0.5rem; }
