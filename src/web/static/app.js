@@ -256,12 +256,36 @@ function planeIcon(track) {
   });
 }
 
+function baseLayers() {
+  const osmAttr = "&copy; OpenStreetMap contributors";
+  const cartoAttr = osmAttr + " &copy; CARTO";
+  return {
+    // Dark, minimal: roads/water/place names, no POI clutter.
+    "Dark (minimal)": L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      { maxZoom: 20, subdomains: "abcd", attribution: cartoAttr }),
+    "Light (minimal)": L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+      { maxZoom: 20, subdomains: "abcd", attribution: cartoAttr }),
+    "Topographic": L.tileLayer(
+      "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+      { maxZoom: 17, subdomains: "abc",
+        attribution: "&copy; OpenTopoMap (CC-BY-SA), " + osmAttr }),
+    "OSM": L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      { maxZoom: 19, attribution: osmAttr }),
+  };
+}
+
 function initMap() {
   if (map) return;
   map = L.map("map", { zoomControl: true }).setView([rxLat, rxLon], 7);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 18, attribution: "&copy; OpenStreetMap contributors",
-  }).addTo(map);
+  const bases = baseLayers();
+  const saved = localStorage.getItem("basemap");
+  const initial = bases[saved] ? saved : "Dark (minimal)";
+  bases[initial].addTo(map);
+  L.control.layers(bases).addTo(map);
+  map.on("baselayerchange", (e) => localStorage.setItem("basemap", e.name));
   homeMarker = L.circleMarker([rxLat, rxLon], {
     radius: 5, color: "#f0883e", fillColor: "#f0883e", fillOpacity: 1,
   }).addTo(map).bindTooltip("Receiver");

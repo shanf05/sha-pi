@@ -17,6 +17,12 @@ VENV="$HOME/.venvs/sha-pi-web"
 SERVICE="/etc/systemd/system/sha-pi-web.service"
 RUN_USER="$(id -un)"
 
+# Configurable runtime settings, baked into the systemd unit. Override per run, e.g.
+#   SHAPI_RX_LAT=48.137 SHAPI_RX_LON=11.575 bash scripts/install-web.sh
+RX_LAT="${SHAPI_RX_LAT:-50.05}"          # ADS-B map: receiver latitude
+RX_LON="${SHAPI_RX_LON:-8.60}"           # ADS-B map: receiver longitude
+SPECTRUM_RANGE="${SHAPI_SPECTRUM_RANGE:-88M:108M:50k}"  # spectrum sweep start:stop:step
+
 if [[ $EUID -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
 
 echo "==> Installing Python venv tooling"
@@ -40,6 +46,9 @@ Type=simple
 User=$RUN_USER
 WorkingDirectory=$WEB_DIR
 ExecStart=$VENV/bin/uvicorn app.main:app --host 0.0.0.0 --port 80
+Environment=SHAPI_RX_LAT=$RX_LAT
+Environment=SHAPI_RX_LON=$RX_LON
+Environment=SHAPI_SPECTRUM_RANGE=$SPECTRUM_RANGE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=3
@@ -48,9 +57,10 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-echo "==> Enabling and starting the service"
+echo "==> Enabling and (re)starting the service"
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --now sha-pi-web.service
+$SUDO systemctl enable sha-pi-web.service
+$SUDO systemctl restart sha-pi-web.service   # restart (not just start) so config/code changes load
 sleep 1
 $SUDO systemctl --no-pager status sha-pi-web.service | head -12
 
